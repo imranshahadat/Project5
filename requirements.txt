@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+jinja2
+pydantic-settings
+boto3
+psycopg[binary,pool]
+pypdf
+python-docx
+httpx
+langgraph
+pinecone
+python-dotenv
+glassflow-rius
+mlflow
+langchain-openai
+pytest

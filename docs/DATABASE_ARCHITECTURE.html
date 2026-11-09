@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project4 — Database Architecture</title>
+<style>
+
+:root { --fg:#1f2328; --muted:#59636e; --bg:#fff; --code-bg:#f6f8fa;
+        --border:#d1d9e0; --accent:#0969da; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; }
+main { max-width: 920px; margin:0 auto; padding:48px 28px 24px; }
+h1,h2,h3,h4 { line-height:1.25; margin:1.6em 0 .6em; font-weight:600; }
+h1 { font-size:2em; margin-top:0; padding-bottom:.3em;
+     border-bottom:1px solid var(--border); }
+h2 { font-size:1.5em; padding-bottom:.3em; border-bottom:1px solid var(--border); }
+h3 { font-size:1.2em; }
+a { color:var(--accent); text-decoration:none; }
+a:hover { text-decoration:underline; }
+blockquote { margin:0 0 1em; padding:.4em 1em; color:var(--muted);
+             border-left:.25em solid var(--border); }
+code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+       font-size:.875em; background:var(--code-bg);
+       padding:.2em .35em; border-radius:4px; }
+pre { background:var(--code-bg); padding:14px 16px; border-radius:8px;
+      overflow-x:auto; line-height:1.5; }
+pre code { background:none; padding:0; font-size:.82em; }
+table { border-collapse:collapse; margin:1em 0; width:100%; font-size:.92em;
+        display:block; overflow-x:auto; }
+th,td { border:1px solid var(--border); padding:6px 10px;
+        text-align:left; vertical-align:top; }
+th { background:var(--code-bg); font-weight:600; }
+tr:nth-child(even) td { background:#fafbfc; }
+footer { max-width:920px; margin:0 auto; padding:16px 28px 40px;
+         color:var(--muted); font-size:.85em; }
+
+
+</style>
+</head>
+<body>
+<main>
+<h1 id="project4-database-architecture">Project4 — Database Architecture</h1>
+<blockquote>
+<p><strong>Scope:</strong> persistence layer only — schema, connection management, repositories,
+and schema setup/verification. Providers, LLMs and embeddings are covered in
+<code>ARCHITECTURE.md</code>.</p>
+</blockquote>
+<h2 id="1-overview">1. Overview</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Choice</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Database</td>
+<td>PostgreSQL 16, hosted on <strong>Render</strong></td>
+</tr>
+<tr>
+<td>ORM</td>
+<td>SQLAlchemy 2.0 (<code>DeclarativeBase</code>, <code>Mapped</code>, <code>mapped_column</code>)</td>
+</tr>
+<tr>
+<td>Config</td>
+<td>pydantic-settings — <code>DatabaseSettings</code>, driven by <code>.env</code></td>
+</tr>
+<tr>
+<td>TLS</td>
+<td><code>sslmode=require</code> auto-appended in <code>engine.py</code></td>
+</tr>
+<tr>
+<td>Setup/verify</td>
+<td><code>scripts/init_db.py</code> (idempotent)</td>
+</tr>
+<tr>
+<td>Reference DDL</td>
+<td><code>db/reference_schema.sql</code> (kept in sync, docs / psql bootstrap)</td>
+</tr>
+</tbody>
+</table>
+<p>One table per concern:</p>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Table</th>
+<th>Written by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Document storage</td>
+<td><code>documents</code></td>
+<td>ingestion pipeline</td>
+</tr>
+<tr>
+<td>Chat memory</td>
+<td><code>chat_history</code></td>
+<td>agent loop</td>
+</tr>
+<tr>
+<td>HITL approvals</td>
+<td><code>approvals</code></td>
+<td>agent + human reviewer</td>
+</tr>
+<tr>
+<td>User feedback</td>
+<td><code>feedback</code></td>
+<td>UI</td>
+</tr>
+<tr>
+<td>Audit trail</td>
+<td><code>audit_events</code></td>
+<td>cross-cutting logger</td>
+</tr>
+<tr>
+<td>Guardrail events</td>
+<td><code>guardrail_logs</code></td>
+<td>input/output guardrails</td>
+</tr>
+</tbody>
+</table>
+<h2 id="2-entity-relationships">2. Entity relationships</h2>
+<pre class="codehilite"><code class="language-text">                ┌───────────────┐
+                │   documents   │   ingested content + metadata
+                └───────────────┘
+
+┌───────────────────┐    same thread_id     ┌───────────────┐
+│   chat_history    │◄─────────────────────►│   approvals   │
+│  (agent memory)   │     (logical, no FK)  │  (HITL gate)  │
+└─────────┬─────────┘                       └───────────────┘
+          │
+          │ FK: feedback.message_id → chat_history.id (ON DELETE SET NULL)
+          ▼
+┌───────────────────┐
+│     feedback      │
+└───────────────────┘
+
+┌───────────────────┐        ┌──────────────────┐
+│   audit_events    │        │  guardrail_logs  │   append-only, no FKs
+└───────────────────┘        └──────────────────┘
+</code></pre>
+
+<p>There is exactly <strong>one real foreign key</strong> in the whole schema. <code>thread_id</code>
+correlates rows across <code>chat_history</code> / <code>approvals</code> / <code>feedback</code> <em>logically</em>,
+and the two log tables are intentionally standalone — logs must never fail to
+insert (or be cascade-deleted) because of referential rules.</p>
+<h2 id="3-table-reference">3. Table reference</h2>
+<h3 id="31-documents">3.1 <code>documents</code></h3>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Constraints / Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>VARCHAR(36)</td>
+<td>PK, default <code>uuid4()</code></td>
+<td>string UUID — portable</td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>VARCHAR(512)</td>
+<td>NOT NULL</td>
+<td></td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td>TEXT</td>
+<td>NOT NULL</td>
+<td>raw text body</td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td>VARCHAR(512)</td>
+<td>nullable</td>
+<td>URL / file path</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>VARCHAR(20)</td>
+<td>NOT NULL DEFAULT <code>'pending'</code></td>
+<td>CHECK: pending/processing/ready/failed</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>TIMESTAMPTZ</td>
+<td>NOT NULL DEFAULT <code>now()</code></td>
+<td>server-side</td>
+</tr>
+<tr>
+<td><code>updated_at</code></td>
+<td>TIMESTAMPTZ</td>
+<td>NOT NULL DEFAULT <code>now()</code></td>
+<td>ORM <code>onupdate</code></td>
+</tr>
+</tbody>
+</table>
+<p>Index <code>(status, created_at)</code> serves the ingestion-queue query
+("oldest pending documents first").</p>
+<h3 id="32-chat_history">3.2 <code>chat_history</code></h3>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Constraints / Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>VARCHAR(36)</td>
+<td>PK</td>
+<td></td>
+</tr>
+<tr>
+<td><code>thread_id</code></td>
+<td>VARCHAR(64)</td>
+<td>NOT NULL</td>
+<td>one conversation = one thread</td>
+</tr>
+<tr>
+<td><code>role</code></td>
+<td>VARCHAR(16)</td>
+<td>NOT NULL</td>
+<td>CHECK: system/user/assistant/tool</td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td>TEXT</td>
+<td>NOT NULL</td>
+<td></td>
+</tr>
+<tr>
+<td><code>doc_ids</code></td>
+<td>JSONB</td>
+<td>nullable</td>
+<td>retrieved document ids — RAG traceability</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td>JSONB</td>
+<td>nullable</td>
+<td>model, token counts, latency (ORM attr <code>meta</code>)</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>TIMESTAMPTZ</td>
+<td>NOT NULL DEFAULT <code>now()</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Index <code>(thread_id, created_at)</code> serves timeline reads
+("last N turns of this conversation, oldest first").</p>
+<h3 id="33-approvals-hitl">3.3 <code>approvals</code> (HITL)</h3>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Constraints / Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>VARCHAR(36)</td>
+<td>PK</td>
+<td></td>
+</tr>
+<tr>
+<td><code>thread_id</code></td>
+<td>VARCHAR(64)</td>
+<td>NOT NULL</td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_type</code></td>
+<td>VARCHAR(64)</td>
+<td>NOT NULL</td>
+<td>e.g. <code>send_email</code>, <code>run_tool</code></td>
+</tr>
+<tr>
+<td><code>payload</code></td>
+<td>JSONB</td>
+<td>NOT NULL</td>
+<td>exactly what the agent wants to do</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>VARCHAR(16)</td>
+<td>DEFAULT <code>'pending'</code></td>
+<td>CHECK: pending/approved/rejected/expired</td>
+</tr>
+<tr>
+<td><code>requested_by</code></td>
+<td>VARCHAR(128)</td>
+<td>nullable</td>
+<td></td>
+</tr>
+<tr>
+<td><code>decided_by</code></td>
+<td>VARCHAR(128)</td>
+<td>nullable</td>
+<td></td>
+</tr>
+<tr>
+<td><code>decision_note</code></td>
+<td>TEXT</td>
+<td>nullable</td>
+<td>reviewer's comment</td>
+</tr>
+<tr>
+<td><code>requested_at</code></td>
+<td>TIMESTAMPTZ</td>
+<td>NOT NULL DEFAULT <code>now()</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>decided_at</code></td>
+<td>TIMESTAMPTZ</td>
+<td>nullable</td>
+<td></td>
+</tr>
+<tr>
+<td><code>expires_at</code></td>
+<td>TIMESTAMPTZ</td>
+<td>nullable</td>
+<td>timeout → marked <code>expired</code></td>
+</tr>
+</tbody>
+</table>
+<p>Indexes: <code>thread_id</code>; <code>(status, requested_at)</code> serves the reviewer's pending
+queue and any background expiry sweep.</p>
+<h3 id="34-feedback">3.4 <code>feedback</code></h3>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Constraints / Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>VARCHAR(36)</td>
+<td>PK</td>
+<td></td>
+</tr>
+<tr>
+<td><code>thread_id</code></td>
+<td>VARCHAR(64)</td>
+<td>NOT NULL</td>
+<td></td>
+</tr>
+<tr>
+<td><code>message_id</code></td>
+<td>VARCHAR(36)</td>
+<td>nullable <strong>FK</strong></td>
+<td>→ <code>chat_history.id</code> ON DELETE SET NULL</td>
+</tr>
+<tr>
+<td><code>rating</code></td>
+<td>SMALLINT</td>
+<td>nullable</td>
+<td>CHECK: 1–5 or NULL</td>
+</tr>
+<tr>
+<td><code>is_helpful</code></td>
+<td>BOOLEAN</td>
+<td>nullable</td>
+<td>thumbs up / down</td>
+</tr>
+<tr>
+<td><code>category</code></td>
+<td>VARCHAR(64)</td>
+<td>nullable</td>
+<td>e.g. <code>accuracy</code></td>
+</tr>
+<tr>
+<td><code>comment</code></td>
+<td>TEXT</td>
+<td>nullable</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>TIMESTAMPTZ</td>
+<td>NOT NULL DEFAULT <code>now()</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="35-audit_events">3.5 <code>audit_events</code></h3>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Constraints / Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>VARCHAR(36)</td>
+<td>PK</td>
+<td></td>
+</tr>
+<tr>
+<td><code>actor</code></td>
+<td>VARCHAR(128)</td>
+<td>DEFAULT <code>'system'</code></td>
+<td>user id / agent name</td>
+</tr>
+<tr>
+<td><code>actor_type</code></td>
+<td>VARCHAR(16)</td>
+<td>DEFAULT <code>'system'</code></td>
+<td>CHECK: user/agent/system</td>
+</tr>
+<tr>
+<td><code>action</code></td>
+<td>VARCHAR(128)</td>
+<td>NOT NULL</td>
+<td>dotted verb, e.g. <code>approval.granted</code></td>
+</tr>
+<tr>
+<td><code>entity_type</code></td>
+<td>VARCHAR(64)</td>
+<td>nullable</td>
+<td><code>document</code>, <code>approval</code>, …</td>
+</tr>
+<tr>
+<td><code>entity_id</code></td>
+<td>VARCHAR(36)</td>
+<td>nullable</td>
+<td></td>
+</tr>
+<tr>
+<td><code>detail</code></td>
+<td>JSONB</td>
+<td>nullable</td>
+<td>structured context</td>
+</tr>
+<tr>
+<td><code>ip_address</code></td>
+<td>VARCHAR(45)</td>
+<td>nullable</td>
+<td>IPv6-safe</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>TIMESTAMPTZ</td>
+<td>NOT NULL DEFAULT <code>now()</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Indexes: <code>(action, created_at)</code> for "what happened recently of type X";
+<code>(entity_type, entity_id)</code> for an entity's full history.</p>
+<h3 id="36-guardrail_logs">3.6 <code>guardrail_logs</code></h3>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Constraints / Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>VARCHAR(36)</td>
+<td>PK</td>
+<td></td>
+</tr>
+<tr>
+<td><code>thread_id</code></td>
+<td>VARCHAR(64)</td>
+<td>nullable</td>
+<td></td>
+</tr>
+<tr>
+<td><code>stage</code></td>
+<td>VARCHAR(16)</td>
+<td>NOT NULL</td>
+<td>CHECK: input/output</td>
+</tr>
+<tr>
+<td><code>guardrail</code></td>
+<td>VARCHAR(64)</td>
+<td>NOT NULL</td>
+<td>e.g. <code>pii_filter</code>, <code>prompt_injection</code></td>
+</tr>
+<tr>
+<td><code>outcome</code></td>
+<td>VARCHAR(16)</td>
+<td>NOT NULL</td>
+<td>CHECK: blocked/flagged/redacted/allowed</td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td>TEXT</td>
+<td>nullable</td>
+<td></td>
+</tr>
+<tr>
+<td><code>snippet</code></td>
+<td>TEXT</td>
+<td>nullable</td>
+<td><strong>truncated</strong> — may contain PII</td>
+</tr>
+<tr>
+<td><code>scores</code></td>
+<td>JSONB</td>
+<td>nullable</td>
+<td>confidence, thresholds</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>TIMESTAMPTZ</td>
+<td>NOT NULL DEFAULT <code>now()</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Indexes: <code>thread_id</code>; <code>(outcome, created_at)</code> for "blocked events, last 24h".</p>
+<h2 id="4-design-conventions">4. Design conventions</h2>
+<ul>
+<li><strong>String UUIDs</strong> (<code>VARCHAR(36)</code>) everywhere — portable, debuggable, matches the
+  original <code>Document</code> model.</li>
+<li><strong>CHECK constraints instead of PG enums</strong> — adding a status later is a
+  one-line migration instead of an enum-alter dance.</li>
+<li><strong><code>TIMESTAMPTZ</code> for all timestamps</strong> — no naive datetimes, ever.</li>
+<li><strong>JSONB for semi-structured data</strong> (<code>payload</code>, <code>detail</code>, <code>metadata</code>, <code>scores</code>,
+  <code>doc_ids</code>) — schema-free extras without new tables.</li>
+<li><strong>No FKs on append-only tables</strong> (<code>audit_events</code>, <code>guardrail_logs</code>) — logging
+  must never fail or cascade.</li>
+<li><strong>One real FK</strong>: <code>feedback.message_id → chat_history.id ON DELETE SET NULL</code> —
+  feedback survives message deletion.</li>
+<li>The ORM attribute is <code>meta</code> mapped to column <code>metadata</code> because <code>.metadata</code>
+  is reserved by SQLAlchemy's declarative API.</li>
+</ul>
+<h2 id="5-connection-session-management">5. Connection &amp; session management</h2>
+<p><code>src/app/domains/infrastructure/database/engine.py</code> is the <strong>only</strong> file that
+knows connection details:</p>
+<pre class="codehilite"><code class="language-python">@lru_cache(maxsize=1)
+def get_engine():
+    s = get_settings().database
+    url = s.url.get_secret_value()
+
+    # Render's external hostname requires TLS; only append if not already set.
+    if &quot;sslmode=&quot; not in url:
+        url += (&quot;&amp;&quot; if &quot;?&quot; in url else &quot;?&quot;) + &quot;sslmode=require&quot;
+
+    return create_engine(
+        url,
+        pool_size=s.pool_size,        # 5
+        max_overflow=s.max_overflow,  # 5  -&gt; hard ceiling of 10 connections
+        pool_pre_ping=True,           # Render suspends idle DBs -&gt; heals stale conns
+        pool_recycle=1800,            # recycle conns older than 30 min
+        echo=s.echo,
+    )
+</code></pre>
+
+<p>Transactions follow one pattern — the composition root owns commit/rollback:</p>
+<pre class="codehilite"><code class="language-python">@contextmanager
+def get_db_session() -&gt; Iterator[Session]:
+    &quot;&quot;&quot;One transaction per `with` block: commit on success, rollback on error.&quot;&quot;&quot;
+    session = get_session_factory()()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+</code></pre>
+
+<p>Also exposed: <code>check_database()</code> — a <code>SELECT version()</code> + table-list probe used
+by the setup script and (later) health endpoints.</p>
+<h2 id="6-repository-layer-ports-adapters">6. Repository layer (ports &amp; adapters)</h2>
+<table>
+<thead>
+<tr>
+<th>Port (<code>domains/interfaces/</code>)</th>
+<th>Adapter (<code>infrastructure/database/</code>)</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BaseDocumentRepository</code></td>
+<td><code>PostgresDocumentRepository</code></td>
+<td>add / get / list documents</td>
+</tr>
+<tr>
+<td><code>BaseChatRepository</code></td>
+<td><code>PostgresChatRepository</code></td>
+<td>append / history / clear</td>
+</tr>
+</tbody>
+</table>
+<p>Domain code never imports SQLAlchemy — only the ports.</p>
+<pre class="codehilite"><code class="language-python">from app.application.dependencies.providers import get_chat_repository
+
+with get_chat_repository() as chat:
+    chat.append(&quot;thread-123&quot;, &quot;user&quot;, &quot;Summarise the architecture doc&quot;)
+    chat.append(&quot;thread-123&quot;, &quot;assistant&quot;, &quot;It's a hexagonal architecture ...&quot;)
+    for m in chat.history(&quot;thread-123&quot;):
+        print(m[&quot;role&quot;], &quot;-&gt;&quot;, m[&quot;content&quot;][:60])
+</code></pre>
+
+<h2 id="7-schema-creation-verification">7. Schema creation &amp; verification</h2>
+<p><code>scripts/init_db.py</code> performs, in order:</p>
+<ol>
+<li>Load settings — fail fast with <code>ConfigError</code> if <code>DATABASE_URL</code> is missing.</li>
+<li><code>check_database()</code> — connectivity probe, prints server version.</li>
+<li><code>Base.metadata.create_all()</code> — <strong>idempotent</strong>: creates only missing tables.</li>
+<li>Assert the six expected tables exist; exit non-zero otherwise.</li>
+<li><strong>Probe round-trip</strong> — insert one row into every table, <code>flush()</code> (fires all
+   CHECK constraints), read each back, then <code>rollback()</code>. Verifies the schema
+   end-to-end while leaving zero rows behind.</li>
+</ol>
+<p>Expected output:</p>
+<pre class="codehilite"><code class="language-text">Target: dpg-xxxx.oregon-postgres.render.com/project4_db
+Connected: PostgreSQL 16.x
+Tables (6): approvals, audit_events, chat_history, documents, feedback, guardrail_logs
+All 6 expected tables present.
+  insert + read-back probes: OK
+
+Schema created and verified ✔
+</code></pre>
+
+<p>Manual alternative: <code>psql "$DATABASE_URL" -f db/reference_schema.sql</code>, then
+<code>psql "$DATABASE_URL" -c '\dt'</code>.</p>
+<h2 id="8-operations-notes-render">8. Operations notes (Render)</h2>
+<ul>
+<li>Use the <strong>External Database URL</strong> for local development; the Internal URL only
+  resolves from services running on Render.</li>
+<li><code>sslmode=require</code> is appended automatically if missing.</li>
+<li><code>pool_pre_ping</code> + <code>pool_recycle=1800</code> absorb Render's idle-suspension behaviour
+  (same trick the config used for Neon).</li>
+<li>Connection budget: <code>pool_size 5 + max_overflow 5 = 10</code> — do not raise it much;
+  lower Render tiers have tight connection limits.</li>
+<li>Render's <strong>free Postgres expires after ~30 days</strong> — fine for demos, not for
+  durable storage.</li>
+</ul>
+<h2 id="9-file-map">9. File map</h2>
+<pre class="codehilite"><code class="language-text">Project4/
+├── db/
+│   └── reference_schema.sql                  # raw DDL mirror (docs / psql bootstrap)
+├── scripts/
+│   └── init_db.py                            # create_all + probe verification
+└── src/app/
+    ├── application/dependencies/providers.py # get_db_session, get_chat_repository
+    ├── core/config.py                        # DatabaseSettings (url, pool, echo)
+    └── domains/
+        ├── interfaces/
+        │   ├── repositories.py               # port: BaseDocumentRepository
+        │   └── chat.py                       # port: BaseChatRepository
+        └── infrastructure/database/
+            ├── engine.py                     # engine, sessionmaker, health probe
+            ├── models.py                     # 6 tables — source of truth
+            └── postgres_repositories.py      # adapters (document, chat)
+</code></pre>
+
+<h2 id="10-roadmap">10. Roadmap</h2>
+<ul>
+<li><code>BaseApprovalRepository</code> port + adapter (create → poll → decide → expire).</li>
+<li><code>AuditLogger</code> helper writing <code>audit_events</code> / <code>guardrail_logs</code> around the
+  agent loop.</li>
+<li>Pinecone vector store (separate infrastructure — deliberately <strong>not</strong> in this
+  database).</li>
+<li>Introduce Alembic migrations once the schema stabilises.</li>
+</ul>
+</main>
+<footer>Generated 2026-11-07 17:19 from DATABASE_ARCHITECTURE.md — Project4 database layer</footer>
+</body>
+</html>

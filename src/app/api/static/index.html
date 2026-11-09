@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="RAG Chat Terminal — ask questions, get grounded answers.">
+<title>RAG Chat Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg-deep:   #050709; --bg: #0a0d11; --bg-soft: #0e1217; --bg-elev: #131820;
+    --fg:        #d8d4ce; --fg-dim: #6b7585; --fg-faint: #2a303c;
+    --amber:     #ffb86c; --amber-bright: #ffd09b; --phosphor: #a3e635;
+    --cyan:      #67e8f9; --magenta: #f472b6; --red: #ef4444; --green: #4ade80; --yellow: #facc15;
+    --border:    #1d2530;
+  }
+  html, body {
+    height: 100%; background: var(--bg-deep); color: var(--fg);
+    font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 14px; line-height: 1.55; overflow: hidden;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  body {
+    display: flex; flex-direction: column; position: relative;
+    background: radial-gradient(ellipse 80% 50% at top, rgba(255, 184, 108, 0.05), transparent 70%),
+                radial-gradient(ellipse 60% 40% at bottom, rgba(103, 232, 249, 0.025), transparent 70%),
+                var(--bg-deep);
+  }
+  body::before {
+    content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 99;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/></filter><rect width='200' height='200' filter='url(%23n)' opacity='0.5'/></svg>");
+    mix-blend-mode: overlay; opacity: 0.06;
+  }
+  .crt-overlay { position: fixed; inset: 0; pointer-events: none; z-index: 100; transition: opacity 0.4s; }
+  .scanlines {
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px, rgba(0,0,0,0.32) 3px, rgba(0,0,0,0.32) 4px);
+    opacity: 0.55; animation: scan 6s linear infinite;
+  }
+  @keyframes scan { 0% { transform: translateY(0); } 100% { transform: translateY(4px); } }
+  .vignette { position: absolute; inset: 0; background: radial-gradient(ellipse 110% 100% at center, transparent 45%, rgba(0,0,0,0.55) 100%); }
+  .flicker { position: absolute; inset: 0; background: rgba(255, 184, 108, 0.018); animation: flicker 7s infinite; }
+  @keyframes flicker { 0%, 94%, 100% { opacity: 1; } 95% { opacity: 0.82; } 96% { opacity: 1; } 97% { opacity: 0.93; } 98% { opacity: 1; } }
+  .status-bar {
+    display: flex; justify-content: space-between; align-items: center; padding: 5px 14px;
+    background: linear-gradient(to bottom, var(--bg-soft), var(--bg)); border-bottom: 1px solid var(--border);
+    font-size: 11px; color: var(--fg-dim); flex-shrink: 0; user-select: none; letter-spacing: 0.02em;
+  }
+  .status-group { display: flex; gap: 16px; align-items: center; }
+  .status-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .status-item b { color: var(--amber); font-weight: 500; }
+  .status-item .dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green);
+    box-shadow: 0 0 7px var(--green); animation: pulse 2s ease-in-out infinite;
+  }
+  .status-item .dot.offline { background: var(--red); box-shadow: 0 0 7px var(--red); }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.85); } }
+  .terminal { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 14px 18px; position: relative; overflow: hidden; }
+  .output { flex: 1; overflow-y: auto; overflow-x: hidden; padding-right: 8px; padding-bottom: 6px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  .output::-webkit-scrollbar { width: 6px; }
+  .output::-webkit-scrollbar-track { background: transparent; }
+  .output::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .output::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }
+  .line { margin-bottom: 2px; word-break: break-word; white-space: pre-wrap; }
+  .prompt-line { display: flex; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--bg-soft); position: relative; flex-shrink: 0; }
+  .prompt { color: var(--green); text-shadow: 0 0 8px rgba(74, 222, 128, 0.45); font-weight: 500; flex-shrink: 0; user-select: none; }
+  .prompt .path { color: var(--cyan); text-shadow: 0 0 6px rgba(103, 232, 249, 0.4); }
+  .input-area { position: relative; flex: 1; min-width: 0; }
+  .input-display { pointer-events: none; color: var(--fg); }
+  .ghost-text { color: var(--fg-dim); opacity: 0.55; }
+  .block-cursor {
+    display: inline-block; width: 8px; height: 17px; background: var(--amber); vertical-align: text-bottom;
+    box-shadow: 0 0 8px var(--amber); animation: blink 1.06s steps(2, end) infinite; margin-left: 1px; margin-right: 1px;
+  }
+  @keyframes blink { 0%, 49.999% { opacity: 1; } 50%, 100% { opacity: 0; } }
+  #cmdInput { position: absolute; inset: 0; width: 100%; height: 100%; background: transparent; border: none; outline: none; color: transparent; caret-color: transparent; font: inherit; z-index: 2; cursor: text; padding: 0; }
+  .error { color: var(--red); text-shadow: 0 0 5px rgba(239, 68, 68, 0.4); }
+  .success { color: var(--green); }
+  .info, .cyan { color: var(--cyan); }
+  .warn, .yellow { color: var(--yellow); }
+  .dim { color: var(--fg-dim); }
+  .amber { color: var(--amber); }
+  .magenta { color: var(--magenta); }
+  .phosphor { color: var(--phosphor); }
+  .cmd-echo { color: var(--fg); }
+  .post { margin: 8px 0 14px; }
+  .post h1, .post h2, .post h3 { color: var(--amber); font-weight: 600; text-shadow: 0 0 10px rgba(255, 184, 108, 0.4); line-height: 1.3; margin: 18px 0 8px; }
+  .post h1 { font-size: 1.5em; letter-spacing: -0.01em; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .post h2 { font-size: 1.2em; }
+  .post h3 { font-size: 1.05em; color: var(--amber-bright); }
+  .post p { margin: 8px 0; color: var(--fg); }
+  .post em { color: var(--fg); font-style: italic; opacity: 0.85; }
+  .post strong { color: var(--amber-bright); font-weight: 600; }
+  .post code { color: var(--phosphor); background: rgba(163, 230, 53, 0.08); padding: 1px 5px; border-radius: 2px; font-size: 0.95em; border: 1px solid rgba(163, 230, 53, 0.18); }
+  .post pre { margin: 10px 0; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 3px; padding: 10px 12px; overflow-x: auto; }
+  .post pre code { display: block; padding: 0; background: transparent; border: none; color: var(--fg); font-size: 0.95em; line-height: 1.5; }
+  .post a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; text-decoration-color: rgba(103, 232, 249, 0.4); transition: color 0.15s, text-decoration-color 0.15s; }
+  .post a:hover { color: var(--magenta); text-decoration-color: var(--magenta); }
+  .post blockquote { border-left: 2px solid var(--amber); padding: 6px 0 6px 14px; margin: 12px 0; color: var(--fg-dim); font-style: italic; background: rgba(255, 184, 108, 0.04); }
+  .post ul, .post ol { padding-left: 22px; margin: 8px 0; }
+  .post li { margin: 3px 0; }
+  .post ul li::marker, .post ol li::marker { color: var(--amber); }
+  .divider { color: var(--fg-faint); margin: 8px 0; overflow: hidden; }
+  .man-page { border: 1px solid var(--border); background: linear-gradient(to bottom, rgba(255,184,108,0.025), rgba(255,184,108,0.005)); padding: 10px 14px; margin: 8px 0; border-radius: 2px; box-shadow: inset 0 0 30px rgba(255, 184, 108, 0.03); }
+  .man-page pre { font: inherit; white-space: pre-wrap; color: var(--fg); }
+  .boot-line { color: var(--fg-dim); font-size: 0.95em; }
+  .boot-line .ok { color: var(--green); font-weight: 500; }
+  .boot-line .warn { color: var(--yellow); font-weight: 500; }
+  .answer-block { border-left: 2px solid var(--amber); padding-left: 14px; margin: 6px 0 10px; }
+  .answer-block.blocked { border-color: var(--red); }
+  .answer-block.no-evidence { border-color: var(--yellow); }
+  .sources-list { margin: 8px 0 4px; padding: 6px 0; border-top: 1px dashed var(--border); }
+  .source-item { color: var(--fg-dim); font-size: 0.9em; }
+  .source-item .src-title { color: var(--cyan); }
+  .source-item .src-meta { color: var(--fg-faint); }
+  .status-tag { display: inline-block; padding: 1px 6px; border-radius: 2px; font-size: 0.85em; font-weight: 500; margin: 4px 0; }
+  .status-tag.answered { color: var(--green); border: 1px solid rgba(74,222,128,0.3); background: rgba(74,222,128,0.05); }
+  .status-tag.blocked { color: var(--red); border: 1px solid rgba(239,68,68,0.3); background: rgba(239,68,68,0.05); }
+  .status-tag.no_evidence { color: var(--yellow); border: 1px solid rgba(250,204,21,0.3); background: rgba(250,204,21,0.05); }
+  .thinking { color: var(--amber); }
+  .thinking .spinner { display: inline-block; animation: spin 0.8s linear infinite; }
+  @keyframes spin { 0% { content: '⠋'; } 12.5% { content: '⠙'; } 25% { content: '⠹'; } 37.5% { content: '⠸'; } 50% { content: '⠼'; } 62.5% { content: '⠴'; } 75% { content: '⠦'; } 87.5% { content: '⠧'; } 100% { content: '⠇'; } }
+  .examples { margin: 10px 0; }
+  .example-chip {
+    display: inline-block; padding: 3px 10px; margin: 3px 4px; border: 1px solid var(--border);
+    border-radius: 2px; color: var(--fg-dim); cursor: pointer; font-size: 0.9em;
+    transition: all 0.15s; user-select: none;
+  }
+  .example-chip:hover { border-color: var(--amber); color: var(--amber); background: rgba(255,184,108,0.05); }
+  .guardrail-warning { border: 1px solid rgba(239,68,68,0.3); background: rgba(239,68,68,0.04); padding: 6px 10px; margin: 4px 0; border-radius: 2px; font-size: 0.9em; }
+  ::selection { background: rgba(255, 184, 108, 0.32); color: var(--amber-bright); }
+  @media (max-width: 640px) {
+    html { font-size: 12px; } .terminal { padding: 10px; } .status-bar { font-size: 10px; padding: 4px 10px; }
+    .status-group { gap: 10px; } .status-item:not(.essential):not(:first-child) { display: none; } .block-cursor { width: 7px; height: 15px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  }
+</style>
+</head>
+<body>
+  <div class="crt-overlay" id="crtOverlay" aria-hidden="true">
+    <div class="scanlines"></div><div class="vignette"></div><div class="flicker"></div>
+  </div>
+
+  <header class="status-bar" role="banner">
+    <div class="status-group">
+      <span class="status-item essential"><span class="dot" id="connDot" aria-hidden="true"></span>rag-chat</span>
+      <span class="status-item essential">thread: <b id="statusThread">—</b></span>
+    </div>
+    <div class="status-group">
+<button
+    type="button"
+    id="uploadBtn"
+    class="status-item"
+    style="background:none;border:none;cursor:pointer;
+           color:var(--amber);font:inherit;"
+    title="Upload a document"
+>
+    [ + upload ]
+</button>
+      <span class="status-item" style="cursor:pointer;color:var(--cyan);user-select:none;" onclick="listDocuments()" title="list documents">[ docs ]</span>
+      <span class="status-item">status: <b id="statusMode">idle</b></span>
+      <span class="status-item essential" id="statusTime">--:--:--</span>
+    </div>
+  </header>
+
+  <main class="terminal" role="main">
+    <div class="output" id="output" aria-live="polite" aria-label="chat output" tabindex="-1"></div>
+    <div class="prompt-line" id="promptLine">
+      <span class="prompt" id="promptText" aria-hidden="true">you<span class="path">></span></span>
+      <div class="input-area">
+        <div class="input-display" aria-hidden="true">
+          <span id="typedText"></span><span class="block-cursor" id="blockCursor"></span><span class="ghost-text" id="ghostText"></span>
+        </div>
+        <input type="text" id="cmdInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="type your question" autofocus />
+      </div>
+    </div>
+  </main>
+  <!-- hidden file input — the <label for="fileInput"> in the status bar and
+       the upload box open the native picker via pure HTML, no JS click() -->
+
+<script>
+'use strict';
+
+// =================== CONFIG ===================
+// When served by FastAPI (same origin), leave API_BASE empty.
+// For standalone file:// use, set it to your server, e.g. 'http://127.0.0.1:8000'
+const API_BASE = '';
+const API_CHAT   = API_BASE + '/api/v1/chat';
+const API_HEALTH = API_BASE + '/api/v1/health';
+const API_DOCS   = API_BASE + '/api/v1/documents';
+
+// Example questions shown after boot — clickable by beginners
+const EXAMPLES = [
+  'What is this system about?',
+  'Summarize the main topics in the knowledge base',
+  'How does the document ingestion pipeline work?',
+  'What guardrails are in place?',
+];
+
+// =================== STATE ===================
+const state = {
+  threadId: null,
+  history: [],
+  historyIndex: -1,
+  isWaiting: false,
+  cancelRequested: false,   // FIX: set by Ctrl+C so we can tell abort-from-cancel apart from timeout
+  abortCtrl: null,          // FIX: active AbortController for the in-flight chat request
+  bootTime: Date.now(),
+};
+let thinkingEl = null;
+
+// =================== DOM ===================
+const $ = (id) => document.getElementById(id);
+const output = $('output');
+const cmdInput = $('cmdInput');
+const typedText = $('typedText');
+const ghostText = $('ghostText');
+const statusThread = $('statusThread');
+const statusMode = $('statusMode');
+const statusTime = $('statusTime');
+const connDot = $('connDot');
+
+// =================== UTIL ===================
+function escapeHtml(s) {
+  // FIX: null/undefined previously rendered as the string "undefined";
+  // also escape double quotes so values are safe inside attributes (data-q etc.)
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function scrollBottom() { output.scrollTop = output.scrollHeight; }
+function print(html, cls = '') {
+  const div = document.createElement('div');
+  div.className = 'line' + (cls ? ' ' + cls : '');
+  div.innerHTML = html;
+  output.appendChild(div);
+  scrollBottom();
+  return div;
+}
+function printRaw(html) { return print(html); }
+function printBlank() { print('&nbsp;'); }
+function randomId() { return Math.random().toString(36).slice(2, 10); }
+
+// FIX: uniform error text — AbortError from a timeout used to surface as
+// "The user aborted a request." which was confusing.
+function errText(err) {
+  if (err && err.name === 'AbortError') return 'request timed out';
+  return (err && err.message) || String(err);
+}
+
+// FIX: fetch with a timeout. Without this, a hung server left the spinner
+// spinning forever and `state.isWaiting` stuck true.
+async function fetchWithTimeout(url, opts = {}, ms = 30000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new DOMException('Request timed out', 'TimeoutError')), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// =================== MARKDOWN ===================
+function inlineMd(text) {
+  return text
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+function renderMarkdown(md) {
+  const lines = escapeHtml(md).split('\n');
+  const out = [];
+  let inUl = false, inOl = false, inCode = false;
+  let paraBuf = [];
+  const flushPara = () => { if (paraBuf.length) { out.push('<p>' + paraBuf.join(' ') + '</p>'); paraBuf = []; } };
+  const closeLists = () => { if (inUl) { out.push('</ul>'); inUl = false; } if (inOl) { out.push('</ol>'); inOl = false; } };
+  for (const line of lines) {
+    if (line.match(/^```/)) {
+      if (inCode) { out.push('</code></pre>'); inCode = false; }
+      else { flushPara(); closeLists(); out.push('<pre><code>'); inCode = true; }
+      continue;
+    }
+    if (inCode) { out.push(line); continue; }
+    if (line.trim() === '') { flushPara(); closeLists(); continue; }
+    let m;
+    if (m = line.match(/^### (.+)$/)) { flushPara(); closeLists(); out.push('<h3>' + inlineMd(m[1]) + '</h3>'); }
+    else if (m = line.match(/^## (.+)$/)) { flushPara(); closeLists(); out.push('<h2>' + inlineMd(m[1]) + '</h2>'); }
+    else if (m = line.match(/^# (.+)$/)) { flushPara(); closeLists(); out.push('<h1>' + inlineMd(m[1]) + '</h1>'); }
+    else if (m = line.match(/^&gt; (.+)$/)) { flushPara(); closeLists(); out.push('<blockquote>' + inlineMd(m[1]) + '</blockquote>'); }
+    else if (m = line.match(/^(\d+)\. (.+)$/)) {
+      flushPara(); if (inUl) { out.push('</ul>'); inUl = false; }
+      if (!inOl) { out.push('<ol>'); inOl = true; }
+      out.push('<li>' + inlineMd(m[2]) + '</li>');
+    } else if (m = line.match(/^[-*] (.+)$/)) {
+      flushPara(); if (inOl) { out.push('</ol>'); inOl = false; }
+      if (!inUl) { out.push('<ul>'); inUl = true; }
+      out.push('<li>' + inlineMd(m[1]) + '</li>');
+    } else if (line.match(/^---+$/)) {
+      flushPara(); closeLists(); out.push('<div class="divider">' + '─'.repeat(72) + '</div>');
+    } else {
+      paraBuf.push(inlineMd(line));
+    }
+  }
+  flushPara(); closeLists();
+  if (inCode) out.push('</code></pre>');
+  return out.join('');
+}
+
+// =================== THINKING INDICATOR ===================
+const SPINNER_FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+let spinnerIdx = 0;
+let spinnerTimer = null;
+
+function showThinking(label) {
+  hideThinking();
+  thinkingEl = document.createElement('div');
+  thinkingEl.className = 'line thinking';
+  thinkingEl.innerHTML = '<span class="spinner" id="spinnerChar">⠋</span> ' + escapeHtml(label || 'querying knowledge base...');
+  output.appendChild(thinkingEl);
+  scrollBottom();
+  spinnerTimer = setInterval(() => {
+    spinnerIdx = (spinnerIdx + 1) % SPINNER_FRAMES.length;
+    const el = document.getElementById('spinnerChar');
+    if (el) el.textContent = SPINNER_FRAMES[spinnerIdx];
+  }, 80);
+}
+function hideThinking() {
+  if (spinnerTimer) { clearInterval(spinnerTimer); spinnerTimer = null; }
+  if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+}
+
+// =================== CHAT ===================
+async function sendQuestion(question) {
+  if (state.isWaiting) return;
+  if (!question.trim()) return;
+
+  // echo the user's question
+  print('<span style="color:var(--green)">you<span style="color:var(--cyan)">></span></span> ' + escapeHtml(question), 'cmd-echo');
+
+  // save to history
+  saveHistory(question);
+
+  // slash commands
+  if (question.startsWith('/')) {
+    handleCommand(question);
+    return;
+  }
+
+  state.isWaiting = true;
+  state.cancelRequested = false;
+  statusMode.textContent = 'thinking';
+  statusMode.style.color = 'var(--amber)';
+  showThinking('querying knowledge base...');
+
+  // FIX: manual AbortController so Ctrl+C can cancel; auto-timeout after 90 s
+  state.abortCtrl = new AbortController();
+  const timeoutTimer = setTimeout(() => {
+    if (state.abortCtrl) state.abortCtrl.abort(new DOMException('Request timed out', 'TimeoutError'));
+  }, 90000);
+
+  try {
+    const resp = await fetch(API_CHAT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: question,
+        thread_id: state.threadId,
+      }),
+      signal: state.abortCtrl.signal, // FIX
+    });
+
+    hideThinking();
+
+    if (!resp.ok) {
+      let detail = '';
+      try { const err = await resp.json(); detail = err.detail || err.error || ''; } catch (e) {}
+      renderError(resp.status, detail);
+      return;
+    }
+
+    const data = await resp.json();
+    state.threadId = data.thread_id || state.threadId;
+    statusThread.textContent = state.threadId ? state.threadId.slice(0, 12) : '—';
+    renderAnswer(data);
+  } catch (err) {
+    hideThinking();
+    if (err && err.name === 'AbortError') {
+      // FIX: Ctrl+C now really cancels; timeouts get their own message
+      if (state.cancelRequested) {
+        print('<span class="error">^C request cancelled.</span>', 'error');
+      } else {
+        print('<span class="error">✗ request timed out after 90s.</span>', 'error');
+        print('<span class="dim">  the API may be overloaded — check server logs.</span>', 'dim');
+      }
+      printBlank();
+    } else if (err.name === 'TypeError' || (err.message || '').includes('Failed to fetch')) {
+      print('<span class="error">✗ cannot connect to the API server.</span>', 'error');
+      print('<span class="dim">  make sure it\'s running: <code>python scripts/run_api.py</code></span>', 'dim');
+      print('<span class="dim">  then refresh this page.</span>', 'dim');
+      connDot.classList.add('offline');
+    } else {
+      print('<span class="error">✗ ' + escapeHtml(errText(err)) + '</span>', 'error');
+      printBlank();
+    }
+  } finally {
+    clearTimeout(timeoutTimer);
+    state.abortCtrl = null;
+    state.isWaiting = false;
+    state.cancelRequested = false;
+    statusMode.textContent = 'idle';
+    statusMode.style.color = ''; // FIX: was re-set to amber in both states
+    cmdInput.focus();
+  }
+}
+
+function renderAnswer(data) {
+  const status = data.status || 'answered';
+  const blockCls = status === 'blocked' ? ' blocked' : status === 'no_evidence' ? ' no-evidence' : '';
+
+  // answer body (markdown rendered)
+  const answerHtml = '<div class="answer-block' + blockCls + '">' +
+    '<div class="post">' + renderMarkdown(data.answer || '(no answer)') + '</div>';
+
+  // sources
+  let sourcesHtml = '';
+  if (data.sources && data.sources.length > 0) {
+    sourcesHtml = '<div class="sources-list"><span class="dim">sources:</span>\n';
+    data.sources.forEach((s, i) => {
+      // FIX: coerce score to a number first — a string score crashed .toFixed(3)
+      const sc = Number(s.score);
+      const scoreStr = Number.isFinite(sc) ? sc.toFixed(3) : '—';
+      sourcesHtml += '  <span class="source-item">[' + (i+1) + '] <span class="src-title">' +
+        escapeHtml(s.title || 'untitled') + '</span> <span class="src-meta">doc=' +
+        escapeHtml(s.doc_id || '?') + ' score=' + scoreStr + '</span></span>\n';
+    });
+    sourcesHtml += '</div>';
+  }
+
+  // guardrail warnings (non-allowed outcomes)
+  let guardHtml = '';
+  if (data.guardrail_outcomes) {
+    const flagged = data.guardrail_outcomes.filter(g => g.outcome !== 'allowed');
+    if (flagged.length > 0) {
+      guardHtml = '<div class="guardrail-warning"><span class="error">⚠ guardrail:</span> ';
+      guardHtml += flagged.map(g => escapeHtml(g.guard + ' (' + g.outcome + ')')).join(', ');
+      guardHtml += '</div>';
+    }
+  }
+
+  // status + timing tag
+  // FIX: was status.replace('_','_') — a no-op, so 'no_evidence' never got
+  // the hyphenated CSS class ('no-evidence') that actually exists in the stylesheet
+  const tagCls = status.replace(/_/g, '-');
+  const timing = data.duration_ms ? ' · ' + Math.round(Number(data.duration_ms)) + 'ms' : '';
+  const srcCount = data.sources ? data.sources.length : 0;
+  const tagHtml = '<span class="status-tag ' + tagCls + '">' + escapeHtml(status) + timing + ' · ' + srcCount + ' source' + (srcCount === 1 ? '' : 's') + '</span>';
+
+  printRaw(answerHtml + sourcesHtml + guardHtml + tagHtml + '</div>');
+  printBlank();
+}
+
+function renderError(status, detail) {
+  print('<span class="error">✗ request failed (HTTP ' + status + ')</span>', 'error');
+  if (detail) print('<span class="dim">  ' + escapeHtml(detail) + '</span>', 'dim');
+  if (status >= 500) print('<span class="dim">  the API may be misconfigured — check server logs.</span>', 'dim');
+  printBlank();
+}
+
+// =================== COMMANDS ===================
+function handleCommand(input) {
+  const parts = input.trim().split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  const args = parts.slice(1);
+
+  if (cmd === '/help' || cmd === '/?') {
+    printManPage(
+      'RAG CHAT — HELP\n\n' +
+      'This is an AI assistant that answers questions from your document\n' +
+      'knowledge base using Retrieval-Augmented Generation (RAG).\n\n' +
+      'HOW TO CHAT:\n' +
+      '  1. Type your question in the box below\n' +
+      '  2. Press Enter to send\n' +
+      '  3. The AI searches the knowledge base and answers with citations\n\n' +
+      'DOCUMENTS:\n' +
+      '  /upload          upload a file (opens file picker)\n' +
+      '  /docs            list all documents + their status\n' +
+      '  /doc <id>        show one document\'s details\n\n' +
+      'CONVERSATION:\n' +
+      '  /new             start a new conversation (clears history)\n' +
+      '  /clear           clear the screen\n' +
+      '  /help            show this help\n' +
+      '  /health          check API connectivity\n\n' +
+      'KEYBOARD:\n' +
+      '  Up / Down        recall previous questions\n' +
+      '  Ctrl+L           clear screen\n' +
+      '  Ctrl+C           cancel current request / line\n\n' +
+      'TIPS:\n' +
+      '  - Upload PDF, DOCX, TXT, or MD files (max 25 MB).\n' +
+      '  - After upload, ingestion runs in the background.\n' +
+      '  - Use /docs to check if a document is ready.\n' +
+      '  - Answers cite sources as [1], [2], etc.\n' +
+      '  - The AI only knows what\'s in the knowledge base.'
+    );
+  } else if (cmd === '/new') {
+    state.threadId = null;
+    state.history = [];
+    statusThread.textContent = '—';
+    print('<span class="success">✓ new conversation started</span>', 'success');
+    printBlank();
+  } else if (cmd === '/clear') {
+    output.innerHTML = '';
+  } else if (cmd === '/health') {
+    checkHealth();
+  } else if (cmd === '/upload') {
+    triggerUpload();
+  } else if (cmd === '/docs') {
+    listDocuments();
+  } else if (cmd === '/doc') {
+    if (!args[0]) {
+      print('<span class="error">usage: /doc &lt;doc_id&gt;</span>', 'error');
+    } else {
+      showDocument(args[0]);
+    }
+  } else {
+    print('<span class="error">unknown command: ' + escapeHtml(cmd) + '</span>', 'error');
+    print("<span class='dim'>type /help for available commands.</span>", 'dim');
+  }
+}
+
+async function checkHealth() {
+  showThinking('checking API health...');
+  try {
+    const resp = await fetchWithTimeout(API_HEALTH, {}, 10000);
+    hideThinking();
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    connDot.classList.remove('offline');
+    const comps = data.components || {};
+    let lines = 'HEALTH CHECK\n\n  status: ' + (data.status || '?') + '\n';
+    for (const [name, info] of Object.entries(comps)) {
+      const icon = info.ok ? '✓' : '✗';
+      lines += '  ' + icon + ' ' + name + ': ' + (info.ok ? 'ok' : 'failed') + '\n';
+    }
+    printManPage(lines);
+  } catch (err) {
+    hideThinking();
+    connDot.classList.add('offline');
+    print('<span class="error">✗ API unreachable: ' + escapeHtml(errText(err)) + '</span>', 'error');
+    print('<span class="dim">  start it with: python scripts/run_api.py</span>', 'dim');
+  }
+}
+
+// =================== DOCUMENT UPLOAD / LIST ===================
+// FIX: the HTML contains no <input type="file" id="fileInput">, so the
+// label in the upload box had nothing to target and clicking it did nothing.
+// Create the hidden input ourselves if it's missing.
+function ensureFileInput() {
+  let fi = document.getElementById('fileInput');
+  if (!fi) {
+    fi = document.createElement('input');
+    fi.type = 'file';
+    fi.id = 'fileInput';
+    fi.accept = '.pdf,.docx,.txt,.md,application/pdf,text/plain,text/markdown';
+    // visually-hidden (not display:none — keeps label activation reliable)
+    fi.style.position = 'absolute';
+    fi.style.width = '1px';
+    fi.style.height = '1px';
+    fi.style.opacity = '0';
+    fi.style.overflow = 'hidden';
+    fi.style.clip = 'rect(0 0 0 0)';
+    document.body.appendChild(fi);
+  }
+  return fi;
+}
+const fileInput = ensureFileInput();
+
+function triggerUpload() {
+  // Show a big visible upload box that's a <label> — clicking it opens the
+  // native file picker via pure HTML (no JS click() which browsers may block).
+  const div = document.createElement('div');
+  div.className = 'line';
+  div.innerHTML =
+    '<div style="border:2px dashed var(--amber);padding:24px 16px;text-align:center;margin:10px 0;border-radius:4px;background:rgba(255,184,108,0.03);">' +
+    '<label for="fileInput" style="display:block;cursor:pointer;color:var(--amber);font-size:1.1em;font-weight:600;text-shadow:0 0 8px rgba(255,184,108,0.3);">' +
+    'Click here to choose a file</label>' +
+    '<div style="color:var(--fg-dim);margin-top:8px;font-size:0.9em;">' +
+    'PDF, DOCX, TXT, MD — max 25 MB<br>' +
+    'or drag a file and drop it anywhere on this terminal</div>' +
+    '</div>';
+  output.appendChild(div);
+  scrollBottom();
+}
+
+// ---- drag & drop support ----
+let dragCounter = 0;
+const termEl = document.querySelector('.terminal');
+if (termEl) {
+  termEl.addEventListener('dragenter', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dragCounter++;
+    termEl.style.outline = '2px dashed var(--amber)';
+    termEl.style.outlineOffset = '-4px';
+  });
+  termEl.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); });
+  termEl.addEventListener('dragleave', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dragCounter--;
+    if (dragCounter <= 0) { termEl.style.outline = ''; dragCounter = 0; }
+  });
+  termEl.addEventListener('drop', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dragCounter = 0; termEl.style.outline = '';
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      print('<span class="amber">↓ file dropped: ' + escapeHtml(files[0].name) + '</span>', 'amber');
+      uploadFile(files[0]);
+    }
+  });
+}
+
+// ---- file input wiring ----
+// FIX: was bound twice (once on DOMContentLoaded, once immediately) → every
+// selected file was uploaded TWICE. Now bound exactly once, here.
+fileInput.addEventListener('change', handleFileSelected);
+
+// FIX: the "[ + upload ]" button in the status bar was never wired up at all
+const uploadBtn = document.getElementById('uploadBtn');
+if (uploadBtn) uploadBtn.addEventListener('click', triggerUpload);
+
+async function handleFileSelected(e) {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = ''; // FIX: reset so the same file can be selected again
+  if (!file) { print('<span class="dim">upload cancelled.</span>', 'dim'); printBlank(); return; }
+  await uploadFile(file);
+}
+
+async function uploadFile(file) {
+  const sizeMB = (file.size / 1024 / 1024).toFixed(1);
+  print('<span class="amber">↑ uploading: ' + escapeHtml(file.name) + ' (' + sizeMB + ' MB)...</span>', 'amber');
+  showThinking('uploading to S3...');
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('title', file.name);
+  formData.append('tenant_id', 'public');
+
+  try {
+    const resp = await fetchWithTimeout(API_DOCS + '/upload', { method: 'POST', body: formData }, 120000);
+    hideThinking();
+    if (!resp.ok) {
+      let detail = '';
+      try { const err = await resp.json(); detail = err.detail || err.error || ''; } catch (e) {}
+      print('<span class="error">✗ upload failed (HTTP ' + resp.status + ')</span>', 'error');
+      if (detail) print('<span class="dim">  ' + escapeHtml(detail) + '</span>', 'dim');
+      printBlank();
+      return;
+    }
+    const data = await resp.json();
+    print('<span class="success">✓ uploaded: ' + escapeHtml(data.title || file.name) + '</span>', 'success');
+    print('<span class="dim">  doc_id:  ' + escapeHtml(data.doc_id) + '</span>', 'dim');
+    print('<span class="dim">  status:  ' + escapeHtml(data.status) + '</span>', 'dim');
+    print('<span class="dim">  source:  ' + escapeHtml(data.source) + '</span>', 'dim');
+    if (data.message) print('<span class="dim">  ' + escapeHtml(data.message) + '</span>', 'dim');
+    print('<span class="dim">  check status: /doc ' + escapeHtml(data.doc_id) + '</span>', 'dim');
+    printBlank();
+  } catch (err) {
+    hideThinking();
+    print('<span class="error">✗ ' + escapeHtml(errText(err)) + '</span>', 'error');
+    printBlank();
+  }
+}
+
+async function listDocuments() {
+  showThinking('listing documents...');
+  try {
+    const resp = await fetchWithTimeout(API_DOCS);
+    hideThinking();
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    if (!data.documents || data.documents.length === 0) {
+      print('<span class="dim">no documents yet. type /upload to add one.</span>', 'dim');
+      printBlank();
+      return;
+    }
+    printRaw('<div class="file-header"><span class="dim">' + '─'.repeat(74) + '</span>\n  <span class="amber">documents</span> <span class="dim">(' + data.total + ' total)</span>\n<span class="dim">' + '─'.repeat(74) + '</span></div>');
+    data.documents.forEach(doc => {
+      const st = doc.status || 'unknown'; // FIX: null-safe status
+      const statusCls = st === 'ready' ? 'success' : st === 'failed' ? 'error' : st === 'processing' ? 'amber' : 'dim';
+      const meta = doc.metadata || {};
+      const tags = meta.tags && meta.tags.length ? ' <span class="dim">[' + escapeHtml(meta.tags.join(', ')) + ']</span>' : '';
+      const tenant = meta.tenant_id ? ' <span class="dim">tenant=' + escapeHtml(meta.tenant_id) + '</span>' : '';
+      print('  <span class="cyan">' + escapeHtml(String(doc.id || '?').slice(0, 8)) + '</span>  ' +
+            '<span class="' + statusCls + '">' + escapeHtml(st) + '</span>  ' +
+            escapeHtml(doc.title || 'untitled') + tags + tenant);
+    });
+    print('<span class="dim">' + '─'.repeat(74) + '</span>', 'dim');
+    print('<span class="dim">use /doc &lt;id&gt; for details</span>', 'dim');
+    printBlank();
+  } catch (err) {
+    hideThinking();
+    print('<span class="error">✗ ' + escapeHtml(errText(err)) + '</span>', 'error');
+    printBlank();
+  }
+}
+
+async function showDocument(docId) {
+  showThinking('fetching document...');
+  try {
+    const resp = await fetchWithTimeout(API_DOCS + '/' + encodeURIComponent(docId));
+    hideThinking();
+    if (resp.status === 404) {
+      print('<span class="error">✗ document not found: ' + escapeHtml(docId) + '</span>', 'error');
+      printBlank();
+      return;
+    }
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const doc = await resp.json();
+    const st = doc.status || 'unknown'; // FIX: null-safe status
+    const statusCls = st === 'ready' ? 'success' : st === 'failed' ? 'error' : st === 'processing' ? 'amber' : 'dim';
+    printRaw('<div class="file-header"><span class="dim">' + '─'.repeat(74) + '</span>\n  <span class="amber">' + escapeHtml(doc.title || 'untitled') + '</span> <span class="' + statusCls + '">[' + escapeHtml(st) + ']</span>\n<span class="dim">' + '─'.repeat(74) + '</span></div>');
+    print('  <span class="dim">doc_id:</span>     ' + escapeHtml(doc.id));
+    print('  <span class="dim">source:</span>    ' + escapeHtml(doc.source || '(none)'));
+    if (doc.created_at) print('  <span class="dim">created:</span>    ' + escapeHtml(String(doc.created_at)));
+    const meta = doc.metadata || {};
+    if (Object.keys(meta).length > 0) {
+      print('  <span class="dim">metadata:</span>');
+      for (const [k, v] of Object.entries(meta)) {
+        const valStr = Array.isArray(v) ? v.join(', ') : String(v);
+        if (valStr) print('    <span class="cyan">' + escapeHtml(k) + '</span>: ' + escapeHtml(valStr));
+      }
+    }
+    print('<span class="dim">' + '─'.repeat(74) + '</span>', 'dim');
+    if (st === 'pending') print('<span class="dim">  ingestion queued. check again in a moment.</span>', 'dim');
+    else if (st === 'processing') print('<span class="amber">  ingestion in progress...</span>', 'amber');
+    else if (st === 'failed') print('<span class="error">  ingestion failed. try /reingest via API.</span>', 'error');
+    else if (st === 'ready') print('<span class="success">  ready — you can now ask questions about this document.</span>', 'success');
+    printBlank();
+  } catch (err) {
+    hideThinking();
+    print('<span class="error">✗ ' + escapeHtml(errText(err)) + '</span>', 'error');
+    printBlank();
+  }
+}
+
+// =================== MAN PAGE (typed) ===================
+let typingCancelled = false;
+async function typeOutText(text, targetEl, delay = 2) {
+  typingCancelled = false;
+  targetEl.innerHTML = '';
+  let buf = '';
+  for (let i = 0; i < text.length; i++) {
+    if (typingCancelled) {
+      targetEl.innerHTML = '<pre>' + escapeHtml(text).replace(/\n/g, '<br>') + '</pre>';
+      scrollBottom();
+      return;
+    }
+    buf += text[i];
+    targetEl.innerHTML = '<pre>' + escapeHtml(buf).replace(/\n/g, '<br>') + '</pre>';
+    if (i % 10 === 0) scrollBottom();
+    if (text[i] !== ' ' && text[i] !== '\n' && i % 3 === 0) await sleep(delay);
+  }
+  scrollBottom();
+}
+function printManPage(text) {
+  const div = document.createElement('div');
+  div.className = 'line man-page';
+  output.appendChild(div);
+  scrollBottom();
+  typeOutText(text, div, 1);
+}
+
+// =================== HISTORY ===================
+function navigateHistory(dir) {
+  if (state.history.length === 0) return;
+  if (dir === -1) {
+    if (state.historyIndex === -1) state.historyIndex = state.history.length - 1;
+    else if (state.historyIndex > 0) state.historyIndex--;
+    else return;
+  } else {
+    if (state.historyIndex === -1) return;
+    if (state.historyIndex < state.history.length - 1) state.historyIndex++;
+    else { state.historyIndex = -1; cmdInput.value = ''; typedText.textContent = ''; ghostText.textContent = ''; return; }
+  }
+  cmdInput.value = state.history[state.historyIndex];
+  typedText.textContent = cmdInput.value;
+  ghostText.textContent = '';
+}
+function saveHistory(cmd) {
+  if (state.history[state.history.length - 1] !== cmd) state.history.push(cmd);
+  if (state.history.length > 100) state.history.shift();
+  state.historyIndex = -1;
+}
+
+// =================== GHOST TEXT (example suggestions) ===================
+function updateGhost() {
+  const val = cmdInput.value;
+  if (!val || val.startsWith('/')) { ghostText.textContent = ''; return; }
+  const matches = EXAMPLES.filter(e => e.toLowerCase().startsWith(val.toLowerCase()) && e.toLowerCase() !== val.toLowerCase());
+  if (matches.length > 0) {
+    ghostText.textContent = matches[0].slice(val.length);
+  } else {
+    ghostText.textContent = '';
+  }
+}
+
+// =================== INPUT ===================
+cmdInput.addEventListener('keydown', (e) => {
+  typingCancelled = true;
+  if (state.isWaiting) {
+    // FIX: Ctrl+C during a pending request now actually aborts the fetch
+    if (e.key === 'c' && e.ctrlKey) {
+      e.preventDefault();
+      state.cancelRequested = true;
+      if (state.abortCtrl) state.abortCtrl.abort();
+    }
+    return;
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const val = cmdInput.value;
+    if (!val.trim()) return;
+    cmdInput.value = ''; typedText.textContent = ''; ghostText.textContent = '';
+    sendQuestion(val);
+  } else if (e.key === 'Tab') {
+    e.preventDefault();
+    if (ghostText.textContent) {
+      cmdInput.value += ghostText.textContent;
+      typedText.textContent = cmdInput.value;
+      ghostText.textContent = '';
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault(); navigateHistory(-1);
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault(); navigateHistory(1);
+  } else if (e.key === 'ArrowRight' && ghostText.textContent) {
+    e.preventDefault();
+    cmdInput.value += ghostText.textContent;
+    typedText.textContent = cmdInput.value;
+    ghostText.textContent = '';
+  } else if (e.key === 'l' && e.ctrlKey) {
+    e.preventDefault(); output.innerHTML = '';
+  } else if (e.key === 'c' && e.ctrlKey) {
+    e.preventDefault();
+    print('<span style="color:var(--green)">you<span style="color:var(--cyan)">></span></span> ' + escapeHtml(cmdInput.value) + '<span class="error">^C</span>', 'cmd-echo');
+    cmdInput.value = ''; typedText.textContent = ''; ghostText.textContent = '';
+  }
+});
+cmdInput.addEventListener('input', () => { typedText.textContent = cmdInput.value; updateGhost(); });
+termEl.addEventListener('click', (e) => {
+  if (window.getSelection().toString()) return;
+  cmdInput.focus();
+});
+
+// =================== EXAMPLE CHIPS ===================
+function renderExamples() {
+  let html = '<div class="examples"><span class="dim">try one of these:</span>\n';
+  EXAMPLES.forEach(q => {
+    html += '<span class="example-chip" data-q="' + escapeHtml(q) + '">' + escapeHtml(q) + '</span>';
+  });
+  html += '</div>';
+  printRaw(html);
+  document.querySelectorAll('.example-chip').forEach(el => {
+    el.addEventListener('click', () => {
+      const q = el.getAttribute('data-q');
+      cmdInput.value = q;
+      typedText.textContent = q;
+      sendQuestion(q);
+      cmdInput.value = '';
+      typedText.textContent = '';
+    });
+  });
+}
+
+// =================== CLOCK & BOOT ===================
+function updateClock() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  statusTime.textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+async function pingHealth() {
+  try {
+    const resp = await fetchWithTimeout(API_HEALTH, {}, 5000);
+    if (resp.ok) {
+      connDot.classList.remove('offline');
+      return true;
+    }
+  } catch (e) {}
+  connDot.classList.add('offline');
+  return false;
+}
+
+async function boot() {
+  const bootLines = [
+    { t: '[ <span class="ok">OK</span> ] rag-chat terminal v1.0.0 starting...', d: 60 },
+    { t: '[ <span class="ok">OK</span> ] loading phosphor drivers <span class="dim">[amber]</span>', d: 50 },
+    { t: '[ <span class="ok">OK</span> ] initializing crt subsystem', d: 45 },
+    { t: '[ <span class="ok">OK</span> ] connecting to api <span class="dim">(' + (API_BASE || 'same-origin') + ')</span>', d: 70 },
+  ];
+  for (const line of bootLines) {
+    print(line.t, 'boot-line');
+    await sleep(line.d);
+  }
+
+  const apiOk = await pingHealth();
+  if (apiOk) {
+    print('[ <span class="ok">OK</span> ] api reachable <span class="dim">— guardrails active</span>', 'boot-line');
+  } else {
+    print('[ <span class="warn">!!</span> ] api unreachable <span class="dim">— chat will fail until you start it</span>', 'boot-line');
+    print('<span class="dim">      start with: python scripts/run_api.py</span>', 'boot-line');
+  }
+  print('', 'boot-line');
+
+  const motd =
+    '<span class="dim">┌──────────────────────────────────────────────────────────────────────────┐</span>\n' +
+    '<span class="dim">│</span>                                                                          <span class="dim">│</span>\n' +
+    '<span class="dim">│</span>   <span class="amber" style="font-weight:600">RAG Chat Terminal</span>                                                     <span class="dim">│</span>\n' +
+    '<span class="dim">│</span>                                                                          <span class="dim">│</span>\n' +
+    '<span class="dim">│</span>   Ask any question about the documents in your knowledge base.          <span class="dim">│</span>\n' +
+    '<span class="dim">│</span>   The AI searches, retrieves evidence, and answers with citations.      <span class="dim">│</span>\n' +
+    '<span class="dim">│</span>                                                                          <span class="dim">│</span>\n' +
+    '<span class="dim">│</span>   type your question below and press <span class="success">Enter</span>.                       <span class="dim">│</span>\n' +
+    '<span class="dim">│</span>   type <span class="success">/help</span> for commands.  type <span class="success">/health</span> to check the server.     <span class="dim">│</span>\n' +
+    '<span class="dim">│</span>                                                                          <span class="dim">│</span>\n' +
+    '<span class="dim">└──────────────────────────────────────────────────────────────────────────┘</span>';
+  printRaw(motd);
+  printBlank();
+
+  if (apiOk) renderExamples();
+  printBlank();
+  cmdInput.focus();
+}
+boot();
+</script>
+</body>
+</html>

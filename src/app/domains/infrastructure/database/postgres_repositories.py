@@ -82,16 +82,21 @@ class PostgresDocumentRepository(BaseDocumentRepository):
         )
         return [self._to_dict(d) for d in docs]
 
-    def update_status(self, doc_id: str, status: str) -> None:
+    async def update_status(
+        self, doc_id: str, status: str, error_message: Optional[str] = None
+    ) -> None:
         if status not in self._STATUSES:
-            raise ValueError(
-                f"Invalid status '{status}'. Allowed: {sorted(self._STATUSES)}"
-            )
-        doc = self._session.get(Document, doc_id)
+            raise ValueError(f"Invalid status '{status}'")
+        doc = await self._session.get(Document, doc_id)
         if doc is None:
             raise DocumentNotFoundError(f"Document '{doc_id}' not found")
         doc.status = status
-        self._session.flush()
+        if error_message and hasattr(doc, "meta"):
+            meta = doc.meta or {}
+            meta["error_message"] = error_message
+            doc.meta = meta
+            flag_modified(doc, "meta")
+        await self._session.flush()
 
     def set_source(self, doc_id: str, source: str) -> None:
         doc = self._session.get(Document, doc_id)

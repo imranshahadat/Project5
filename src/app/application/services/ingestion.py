@@ -59,7 +59,7 @@ class IngestionResult:
     reason: Optional[str] = None
 
 
-def process_s3_key(key: str) -> IngestionResult:
+async def process_s3_key(key: str) -> IngestionResult:
     """Entry point — call after a file lands in S3 at `key`."""
     settings = get_settings()
 
@@ -146,7 +146,12 @@ def process_s3_key(key: str) -> IngestionResult:
             doc_id,
             {"chunks": len(chunks), "source": key, "tenant_id": tenant_id},
         )
-        log.info("Ingestion complete: %s (%d vectors, tenant=%s)", doc_id, len(chunks), tenant_id)
+        log.info(
+            "Ingestion complete: %s (%d vectors, tenant=%s)",
+            doc_id,
+            len(chunks),
+            tenant_id,
+        )
         return IngestionResult(doc_id=doc_id, status="ready", num_chunks=len(chunks))
 
     except Exception as e:
